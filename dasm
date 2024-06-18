@@ -1,0 +1,344 @@
+#! /usr/local/anaconda3/bin/python
+
+import json
+
+def parse_iter(data):
+    i = 0
+    ops = []
+    data = data.replace('0x', '').replace('\n', '')
+    while i < len(data):
+        op = int(data[i:i+2], 16)
+        if op in range(0x60, 0x80):
+            ops.append({ 'index': int(i / 2), 'op': f'0x{data[i+2:i + 2 + (op - 0x5f) * 2]}' })
+            i += (op - 0x5f) * 2
+        elif op in op_map:
+            ops.append({'index': int(i / 2), 'op': op_map[op] })
+        else:
+            ops.append({'index': int(i / 2), 'op': 'unknown' })
+        i += 2
+    return ops
+
+
+def blocks(ops):
+    blocks = [[]]
+    reachable = True
+    for op in ops:
+        if reachable:
+            reachable = not (op['op'] in terminal_ops or op['op'] == 'jump')
+            blocks[-1].append(op)
+        else:
+            if op['op'] == 'jumpdest':
+                reachable = True
+                blocks.append([op])
+    return blocks
+
+
+def resolve_jumpdests(blocks):
+    for block in blocks:
+        for (i, op) in enumerate(block):
+            if op['op'] in ['jump', 'jumpi'] and block[i - 1]['op'].startswith('0x'):
+                    dest = int(block[i - 1]['op'].replace('0x', ''), 16)
+                    index = [block[0]['index'] for block in blocks].index(dest)
+                    block[i-1]['op'] = f'{block_names[index].lower()}_dest'
+    return blocks
+
+
+def strip_indices(blocks):
+    return [[op['op'] for op in block] for block in blocks]
+
+
+def deobfuscate(blocks):
+    blocks = [['0x01' if op == 'chainid' else op for op in block] for block in blocks]
+    blocks = [['0x00' if op == 'push0' else op for op in block] for block in blocks]
+    blocks = [['0x00' if op == 'returndatasize' else op for op in block] for block in blocks]
+    blocks = [['0x00' if all(digit == '0' for digit in op.replace('0x', '')) else op for op in block] for block in blocks]
+    blocks = [[f'[{const_map[op]}]' if op in const_map else op for op in block] for block in blocks]
+    blocks = [block[1:] if block[0] == 'jumpdest' else block for block in blocks]
+    return blocks
+
+
+def huffize(blocks):
+    huff = ''
+    main_macro = '#define macro MAIN() = takes (0) returns (0) {\n'
+
+    for (i, block) in enumerate(blocks):
+        if i in range(2, 45):
+            main_macro += f'\t{" ".join(block)}\n'
+            continue
+        if i == 0:
+            main_macro += f'\tAUTHENTICATE()\n'
+        else:
+            main_macro += f'\t{block_names[i].lower()}_dest:\n\t\t{block_names[i]}()\n'
+
+        block_macro = f'#define macro {block_names[i]}() = takes (0) returns (0) {{\n'
+        for op in block:
+            block_macro += f'\t{op}\n'
+        block_macro += '}\n'
+        huff += block_macro
+
+    main_macro += '}\n'
+    huff += main_macro
+
+    return huff
+
+
+def main():
+    data = ''
+    with open('evm.txt', 'r') as f:
+        data = f.read()
+        data = data.replace('\n', '').replace('0x','')
+
+    ops = deobfuscate(strip_indices(resolve_jumpdests(blocks(parse_iter(data)))))
+
+    with open('deobfuscated.huff', 'w') as f:
+        f.write(huffize(ops))
+
+    with open('cfg.json', 'w') as f:
+        f.write(json.dumps(ops, indent=4))
+
+
+block_names = [
+    'AUTHENTICATE',
+    'DISPATCH',
+    'HALT',
+    '','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','',
+    'UNI_V2_SWAP_WETH',
+    'UNI_V2_SWAP_WETH_DYN_DISPATCH',
+    'UNI_V2_SWAP_WETH_DYN_DISPATCH_2',
+    'UNI_V2_SWAP_USDC',
+    'UNI_V2_SWAP_USDC_DYN_DISPATCH',
+    'UNI_V2_SWAP_USDC_DYN_DISPATCH_2',
+    'UNI_V2_SWAP_USDT',
+    'UNI_V2_SWAP_USDT_DYN_DISPATCH',
+    'UNI_V2_SWAP_USDT_DYN_DISPATCH_2',
+    'ERC20_TRANSFER_CD_ADDR',
+    'WETH_WITHDRAW_TO_CALLER',
+    'NUKE_TO_CALLER',
+    'UNI_V2_SWAP_CD_ADDR',
+    'UNI_V2_SWAP_CD_ADDR_DYN_DISPATCH',
+    'UNI_V2_SWAP_CD_ADDR_DYN_DISPATCH_2',
+    'UNI_V2_SWAP_CD_ADDR_DYN_DISPATCH_3',
+    'UNI_V2_SWAP_CD_ADDR_DYN_DISPATCH_4',
+    'UNI_V2_SWAP_CD_ADDR_DYN_DISPATCH_5',
+    'UNI_V2_SWAP_CD_ADDR_DYN_DISPATCH_6',
+    'DISPATCH_CD_DEST_1_BYTE',
+    'WETH_TRANSFER_FROM_SELF',
+    'USDC_TRANSFER',
+    'USDT_TRANSFER',
+    'UNI_V2_SWAP_NO_TRANSFER',
+    'UNI_V2_SWAP_TO_SELF_CD_ADDR',
+    'ERC20_APPROVE_BALANCER',
+    'BALANCER_SWAP',
+    'BALANCER_SWAP_SELF',
+    'UNKNOWN_swapExactAmountOut',
+    'ERC20_APPROVE_MAX',
+    'ERC20_TRANSFER',
+    'NOT_JARED',
+    'WETH_TRANSFER_FROM_SELF_TO_CALLER',
+    'WETH_TRANSFER_FROM_SELF_TO_CALLER_2',
+    'ERC20_TRANSFER_TO_CALLER',
+    'ERC20_TRANSFER_TO_CALLER_2',
+    'ERC20_TRANSFER_SPLIT',
+    'UNI_V3_SWAP_WETH',
+    'UNI_V3_SWAP_WETH_2',
+    'UNI_V3_SWAP_WETH_3',
+    'UNI_V3_SWAP_WETH_4',
+    'UNI_V3_SWAP_CD_ADDR',
+    'UNI_V3_SWAP_CD_ADDR_2',
+    'UNI_V3_SWAP_CD_ADDR_3',
+    'UNI_V3_SWAP_CD_ADDR_4',
+    'UNI_V3_MINT',
+    'UNI_V3_BURN',
+]
+
+terminal_ops = ['stop', 'return', 'revert', 'invalid', 'selfdestruct', 'unknown']
+const_map = {
+    '0xae2fc483527b8ef99eb5d9b44875f005ba1fae13': 'JARED_FROM_SUBWAY',
+    '0x022c0d9f00000000000000000000000000000000000000000000000000000000': 'UNI_V2_SWAP_SEL',
+    '0x022c0d9f': 'UNI_V2_SWAP_SEL_NOPAD',
+    '0x52bbbe2900000000000000000000000000000000000000000000000000000000': 'BALA_SWAP_SEL',
+    '0x23b872dd00000000000000000000000000000000000000000000000000000000': 'ERC20_TRANSFER_FROM_SEL',
+    '0xa9059cbb00000000000000000000000000000000000000000000000000000000': 'ERC20_TRANSFER_SEL',
+    '0x095ea7b300000000000000000000000000000000000000000000000000000000': 'ERC20_APPROVE_SEL',
+    '0x2e1a7d4d00000000000000000000000000000000000000000000000000000000': 'WETH_WITHDRAW_SEL',
+    '0x128acb0800000000000000000000000000000000000000000000000000000000': 'UNI_V3_SWAP_SEL',
+    '0x3c8a7d8d00000000000000000000000000000000000000000000000000000000': 'UNI_V3_MINT_SEL',
+    '0xa34123a700000000000000000000000000000000000000000000000000000000': 'UNI_V3_BURN_SEL',
+    '0x4f1eb3d800000000000000000000000000000000000000000000000000000000': 'UNI_V3_COLLECT_SEL',
+    '0x7c5e9ea400000000000000000000000000000000000000000000000000000000': 'UNKNOWN_swapExactAmountOut_SEL',
+
+    '0xffffffff00000000000000000000000000000000000000000000000000000000': 'BTYES4_MASK',
+    '0xffffffffff000000000000000000000000000000000000000000000000000000': 'BYTES5_MASK',
+    '0xffffffffffffffffffff00000000000000000000000000000000000000000000': 'BYTES10_MASK',
+    '0xffffffffffffffffffffffffffffffffffffffff': 'ADDRESS_MASK',
+    '0x000000000000000000000000000000000000000000000000000000ffffffffff': 'UINT40_MASK',
+    '0xffffffffff': 'UINT40_MASK_NOPAD',
+    '0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff': 'UINT256_MAX',
+    '0xffffffffffffffffffffffffffffffff': 'UINT128_MASK',
+
+    '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2': 'WETH_ADDR',
+    '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48': 'USDC_ADDR',
+    '0xdac17f958d2ee523a2206206994597c13d831ec7': 'USDT_ADDR',
+    '0xba12222222228d8ba445958a75a0704d566bf2c8': 'BALA_ADDR',
+    '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2000000000000000000000000': 'WETH_ADDR_PAD',
+    '0xff1f98431c8ad98523631ae4a59f267346ea31f9840000000000000000000000': 'C2_UNI_V3_FACTORY',
+    '0xffbaceb8ec6b9355dfc0269c18bac9d6e2bdc29c4f0000000000000000000000': 'C2_SUSHI_V3_FACTORY',
+    '0xff41ff9aa7e16b8b1a8a8dc4f0efacd93d02d071c90000000000000000000000': 'C2_PANCAKE_FACTORY',
+    '0xe34f199b19b2b4f47f68442619d555527d244f78a3297ea89325f843f87b8b54': 'UNI_V3_INITCODEHASH',
+    '0x6ce8eb472fa82df5469c6ab6d485f17c3ad13c8cd7af59b3d4a8026c5ce0f7e2': 'PANCAKE_V3_INITCODEHASH',
+    '0x000000000000000000000000fffd8963efd1fc6a506488495d951d5263988d25': 'UNI_V3_MAX_SQRT_PRICE_LIMIT_X96',
+    '0x00000000000000000000000000000000000000000000000000000001000276a4': 'UNI_V3_MIN_SQRT_PRICE_LIMIT_X96',
+}
+
+op_map = {
+    0x00: 'stop',
+    0x01: 'add',
+    0x02: 'mul',
+    0x03: 'sub',
+    0x04: 'div',
+    0x05: 'sdiv',
+    0x06: 'mod',
+    0x07: 'smod',
+    0x08: 'addmod',
+    0x09: 'mulmod',
+    0x0a: 'exp',
+    0x0b: 'signextend',
+    0x10: 'lt',
+    0x11: 'gt',
+    0x12: 'slt',
+    0x13: 'sgt',
+    0x14: 'eq',
+    0x15: 'iszero',
+    0x16: 'and',
+    0x17: 'or',
+    0x18: 'xor',
+    0x19: 'not',
+    0x1a: 'byte',
+    0x1b: 'shl',
+    0x1c: 'shr',
+    0x1d: 'sar',
+    0x20: 'sha3',
+    0x30: 'address',
+    0x31: 'balance',
+    0x32: 'origin',
+    0x33: 'caller',
+    0x34: 'callvalue',
+    0x35: 'calldataload',
+    0x36: 'calldatasize',
+    0x37: 'calldatacopy',
+    0x38: 'codesize',
+    0x39: 'codecopy',
+    0x3a: 'gasprice',
+    0x3b: 'extcodesize',
+    0x3c: 'extcodecopy',
+    0x3d: 'returndatasize',
+    0x3e: 'returndatacopy',
+    0x3f: 'extcodehash',
+    0x40: 'blockhash',
+    0x41: 'coinbase',
+    0x42: 'timestamp',
+    0x43: 'number',
+    0x44: 'difficulty',
+    0x44: 'prevrandao',
+    0x45: 'gaslimit',
+    0x46: 'chainid',
+    0x47: 'selfbalance',
+    0x48: 'basefee',
+    0x50: 'pop',
+    0x51: 'mload',
+    0x52: 'mstore',
+    0x53: 'mstore8',
+    0x54: 'sload',
+    0x55: 'sstore',
+    0x56: 'jump',
+    0x57: 'jumpi',
+    0x58: 'pc',
+    0x59: 'msize',
+    0x5a: 'gas',
+    0x5b: 'jumpdest',
+    0x5c: 'tload',
+    0x5d: 'tstore',
+    0x5f: 'push0',
+    0x60: 'push1',
+    0x61: 'push2',
+    0x62: 'push3',
+    0x63: 'push4',
+    0x64: 'push5',
+    0x65: 'push6',
+    0x66: 'push7',
+    0x67: 'push8',
+    0x68: 'push9',
+    0x69: 'push10',
+    0x6a: 'push11',
+    0x6b: 'push12',
+    0x6c: 'push13',
+    0x6d: 'push14',
+    0x6e: 'push15',
+    0x6f: 'push16',
+    0x70: 'push17',
+    0x71: 'push18',
+    0x72: 'push19',
+    0x73: 'push20',
+    0x74: 'push21',
+    0x75: 'push22',
+    0x76: 'push23',
+    0x77: 'push24',
+    0x78: 'push25',
+    0x79: 'push26',
+    0x7a: 'push27',
+    0x7b: 'push28',
+    0x7c: 'push29',
+    0x7d: 'push30',
+    0x7e: 'push31',
+    0x7f: 'push32',
+    0x80: 'dup1',
+    0x81: 'dup2',
+    0x82: 'dup3',
+    0x83: 'dup4',
+    0x84: 'dup5',
+    0x85: 'dup6',
+    0x86: 'dup7',
+    0x87: 'dup8',
+    0x88: 'dup9',
+    0x89: 'dup10',
+    0x8a: 'dup11',
+    0x8b: 'dup12',
+    0x8c: 'dup13',
+    0x8d: 'dup14',
+    0x8e: 'dup15',
+    0x8f: 'dup16',
+    0x90: 'swap1',
+    0x91: 'swap2',
+    0x92: 'swap3',
+    0x93: 'swap4',
+    0x94: 'swap5',
+    0x95: 'swap6',
+    0x96: 'swap7',
+    0x97: 'swap8',
+    0x98: 'swap9',
+    0x99: 'swap10',
+    0x9a: 'swap11',
+    0x9b: 'swap12',
+    0x9c: 'swap13',
+    0x9d: 'swap14',
+    0x9e: 'swap15',
+    0x9f: 'swap16',
+    0xa0: 'log0',
+    0xa1: 'log1',
+    0xa2: 'log2',
+    0xa3: 'log3',
+    0xa4: 'log4',
+    0xf0: 'create',
+    0xf1: 'call',
+    0xf2: 'callcode',
+    0xf3: 'return',
+    0xf4: 'delegatecall',
+    0xf5: 'create2',
+    0xfa: 'staticcall',
+    0xfd: 'revert',
+    0xfe: 'invalid',
+    0xff: 'selfdestruct',
+}
+
+if __name__ == '__main__':
+    main()
